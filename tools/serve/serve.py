@@ -760,7 +760,8 @@ _subdomains = _make_subdomains_product(_subdomains)
 # Origin policy subdomains need to not be reused by any other tests, since origin policies have
 # origin-wide impacts like installing a CSP or Feature Policy that could interfere with features
 # under test.
-_subdomains |= _make_origin_policy_subdomains(30)
+# See https://github.com/web-platform-tests/rfcs/pull/44.
+_subdomains |= _make_origin_policy_subdomains(99)
 
 _not_subdomains = _make_subdomains_product(_not_subdomains)
 
