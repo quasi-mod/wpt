@@ -1,0 +1,223 @@
+<!doctype html>
+<meta charset=utf-8>
+<title>Use Clear-Site-Data to immediately unregister service workers</title>
+<meta name="timeout" content="long">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script src="resources/test-helpers.sub.js"></script>
+<body>
+<script>
+'use strict';
+
+// Returns a promise for a network response that contains the Clear-Site-Data:
+// "storage" header.
+function clear_site_data() {
+  return fetch('resources/blank.html?pipe=header(Clear-Site-Data,"storage")');
+}
+
+function write_site_data() {
+  return caches.open('unregister-immediately');
+}
+
+async function assert_no_registrations_exist() {
+  const registrations = await navigator.serviceWorker.getRegistrations();
+  assert_equals(registrations.length, 0);
+}
+
+async function add_controlled_iframe(test, url) {
+  const frame = await with_iframe(url);
+  test.add_cleanup(() => { frame.remove(); });
+  assert_true(frame.contentWindow.navigator.serviceWorker.controller !== null);
+  return frame;
+}
+
+promise_test(async test => {
+  await write_site_data();
+
+  // This test keeps the the service worker in the 'parsed' state by using a
+  // script with an infinite loop.
+  const script_url = 'resources/onparse-infiniteloop-worker.js';
+  const scope_url =
+    'resources/onparse-infiniteloop-worker.js?unregister-immediately';
+
+  await service_worker_unregister(test, /*scope=*/script_url);
+
+  // Clear-Site-Data must cause register() to fail.
+  const register_promise = promise_rejects(test, 'AbortError',
+    navigator.serviceWorker.register(script_url, { scope: scope_url}));;
+
+  await Promise.all([clear_site_data(), register_promise]);
+
+  await assert_no_registrations_exist();
+ }, 'Clear-Site-Data must abort service worker registration.');
+
+promise_test(async test => {
+  await write_site_data();
+
+  // This test keeps the the service worker in the 'installing' state by using a
+  // script with an install event waitUntil() promise that never resolves.
+  const script_url = 'resources/oninstall-waituntil-forever.js';
+  const scope_url =
+    'resources/oninstall-waituntil-forever.js?unregister-immediately';
+
+  const registration = await service_worker_unregister_and_register(
+    test, script_url, scope_url);
+  const service_worker = registration.installing;
+
+  // Clear-Site-Data must cause install to fail.
+  await Promise.all([
+    clear_site_data(),
+    wait_for_state(test, service_worker, 'redundant')]);
+
+  await assert_no_registrations_exist();
+ }, 'Clear-Site-Data must unregister a registration with a worker '
+     + 'in the "installing" state.');
+
+ promise_test(async test => {
+  // This test keeps the the service worker in the 'activating' state by using a
+  // script with an activate event waitUntil() promise that never resolves.
+  const script_url = 'resources/onactivate-waituntil-forever.js';
+  const scope_url =
+    'resources/onactivate-waituntil-forever.js?unregister-immediately';
+
+  const registration = await service_worker_unregister_and_register(
+    test, script_url, scope_url);
+  const service_worker = registration.installing;
+
+  await wait_for_state(test, service_worker, 'activating');
+
+  // Clear-Site-Data must cause activation to fail.
+  await Promise.all([
+    clear_site_data(),
+    wait_for_state(test, service_worker, 'redundant')]);
+
+  await assert_no_registrations_exist();
+ }, 'Clear-Site-Data must unregister a registration with a worker '
+     + 'in the "activating" state.');
+
+promise_test(async test => {
+  // Create an registration with two service workers: one activated and one
+  // installed.
+  const script_url = 'resources/update_shell.py';
+  const scope_url =
+    'resources/update_shell.py?unregister-immediately-with-update';
+
+  const registration = await service_worker_unregister_and_register(
+    test, script_url, scope_url);
+  const first_service_worker = registration.installing;
+
+  await wait_for_state(test, first_service_worker, 'activated');
+  registration.update();
+
+  const event_watcher = new EventWatcher(test, registration, 'updatefound');
+  await event_watcher.wait_for('updatefound');
+
+  const second_service_worker = registration.installing;
+  await wait_for_state(test, second_service_worker, 'installed');
+
+  // Clear-Site-Data must clear both workers from the registration.
+  await Promise.all([
+    clear_site_data(),
+    wait_for_state(test, first_service_worker, 'redundant'),
+    wait_for_state(test, second_service_worker, 'redundant')]);
+
+  await assert_no_registrations_exist();
+}, 'Clear-Site-Data must unregister an activated registration with '
+    + 'an update waiting.');
+
+promise_test(async test => {
+  const script_url = 'resources/empty.js';
+  const scope_url =
+    'resources/blank.html?unregister-immediately-with-controlled-client';
+
+  const registration = await service_worker_unregister_and_register(
+    test, script_url, scope_url);
+  const service_worker = registration.installing;
+
+  await wait_for_state(test, service_worker, 'activated');
+  const frame = await add_controlled_iframe(test, scope_url);
+  const frame_registration =
+    await frame.contentWindow.navigator.serviceWorker.ready;
+
+  const event_watcher = new EventWatcher(
+    test, frame.contentWindow.navigator.serviceWorker, 'controllerchange');
+
+  // Clear-Site-Data must remove the iframe's controller.
+  await Promise.all([
+    clear_site_data(),
+    event_watcher.wait_for('controllerchange'),
+    wait_for_state(test, service_worker, 'redundant')]);
+
+  assert_equals(frame.contentWindow.navigator.serviceWorker.controller, null);
+  await assert_no_registrations_exist();
+
+  // The ready promise must continue to resolve with the unregistered
+  // registration.
+  assert_equals(frame_registration,
+    await frame.contentWindow.navigator.serviceWorker.ready);
+}, 'Clear-Site-Data must unregister an activated registration with controlled '
+   + 'clients.');
+
+promise_test(async test => {
+  const script_url = 'resources/empty.js';
+  const scope_url =
+    'resources/blank.html?unregister-immediately-while-waiting-to-clear';
+
+  const registration = await service_worker_unregister_and_register(
+    test, script_url, scope_url);
+  const service_worker = registration.installing;
+
+  await wait_for_state(test, service_worker, 'activated');
+  const frame = await add_controlled_iframe(test, scope_url);
+
+  const event_watcher = new EventWatcher(
+    test, frame.contentWindow.navigator.serviceWorker, 'controllerchange');
+
+  // Unregister waits to clear the registration until no controlled clients
+  // exist.
+  await registration.unregister();
+
+  // Clear-Site-Data must clear the unregistered registration immediately.
+  await Promise.all([
+    clear_site_data(),
+    event_watcher.wait_for('controllerchange'),
+    wait_for_state(test, service_worker, 'redundant')]);
+
+  assert_equals(frame.contentWindow.navigator.serviceWorker.controller, null);
+  await assert_no_registrations_exist();
+}, 'Clear-Site-Data must clear an unregistered registration waiting for '
+   + ' controlled clients to unload.');
+
+// promise_test(async test => {
+//   // Use a service worker script that can produce fetch events with pending
+//   // respondWith() promises that never resolve.
+//   const script_url = 'resources/onfetch-waituntil-forever.js';
+//   const scope_url =
+//     'resources/blank.html?unregister-immediately-with-fetch-event';
+
+//   const registration = await service_worker_unregister_and_register(
+//     test, script_url, scope_url);
+
+//   await wait_for_state(test, registration.installing, 'activated');
+
+//   const frame = await add_controlled_iframe(test, scope_url);
+
+//   // Clear-Site-Data must cause the  pending fetch promise to reject.
+//   const fetch_promise = promise_rejects(
+//     test, new TypeError(), frame.contentWindow.fetch('waituntil-forever'));
+
+//   const event_watcher = new EventWatcher(
+//     test, frame.contentWindow.navigator.serviceWorker, 'controllerchange');
+
+//   await Promise.all([
+//     clear_site_data(),
+//     fetch_promise,
+//     event_watcher.wait_for('controllerchange'),
+//     wait_for_state(test, registration.active, 'redundant'),]);
+
+//   assert_equals(frame.contentWindow.navigator.serviceWorker.controller, null);
+//   await assert_no_registrations_exist();
+// }, 'Clear-Site-Data must fail pending fetch events.');
+
+</script>
+</body>
